@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProfilingLogs", "ProfilingLogs.csproj", "{1ECD8737-75BA-BA0D-39BA-D4AC30D66C39}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1ECD8737-75BA-BA0D-39BA-D4AC30D66C39}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1ECD8737-75BA-BA0D-39BA-D4AC30D66C39}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1ECD8737-75BA-BA0D-39BA-D4AC30D66C39}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1ECD8737-75BA-BA0D-39BA-D4AC30D66C39}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {59895751-6EE7-4047-B87A-1E857A921848}
+	EndGlobalSection
+EndGlobal

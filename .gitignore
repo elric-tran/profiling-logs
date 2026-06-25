@@ -1,0 +1,25 @@
+# Build output
+bin/
+obj/
+
+# NuGet packaging artifacts
+*.nupkg
+*.snupkg
+artifacts/
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Test / coverage
+[Tt]est[Rr]esult*/
+coverage*.json
+coverage*.xml
+*.coverage
+
+# OS files
+.DS_Store
+Thumbs.db
