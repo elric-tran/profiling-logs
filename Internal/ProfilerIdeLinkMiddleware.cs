@@ -12,15 +12,25 @@ namespace ProfilingLogs.Internal;
 internal sealed class ProfilerIdeLinkMiddleware
 {
     private readonly RequestDelegate _next;
+    private readonly ProfilingLogsOptions _options;
+    private readonly ClearableMemoryStorage? _storage;
     private readonly string _resultsPath;
+    private readonly string _resultsIndexPath;
+    private readonly string _clearPath;
     private readonly string _script;
+    private readonly string _clearButtonScript;
 
-    public ProfilerIdeLinkMiddleware(RequestDelegate next, ProfilingLogsOptions options)
+    public ProfilerIdeLinkMiddleware(RequestDelegate next, ProfilingLogsOptions options, ClearableMemoryStorage? storage = null)
     {
         _next = next;
+        _options = options;
+        _storage = storage;
         var basePath = string.IsNullOrWhiteSpace(options.RouteBasePath) ? "/profiler" : options.RouteBasePath.TrimEnd('/');
         _resultsPath = basePath + "/results";
+        _resultsIndexPath = basePath + "/results-index";
+        _clearPath = basePath + "/clear-cache";
         _script = BuildScript(options);
+        _clearButtonScript = BuildClearButtonScript(_clearPath);
     }
 
     private static string BuildScript(ProfilingLogsOptions options)
@@ -104,14 +114,62 @@ internal sealed class ProfilerIdeLinkMiddleware
             .Replace("__SCHEME__", scheme);
     }
 
+    private static string BuildClearButtonScript(string clearPath)
+    {
+        const string template = """
+<script>
+(function () {
+    function addButton() {
+        if (document.getElementById('pl-clear-cache-btn')) return;
+        var btn = document.createElement('button');
+        btn.id = 'pl-clear-cache-btn';
+        btn.type = 'button';
+        btn.textContent = '🗑 Clear all profiler results';
+        btn.style.cssText = 'position:fixed;top:10px;right:10px;z-index:2147483647;padding:8px 14px;' +
+            'background:#c0392b;color:#fff;border:none;border-radius:4px;cursor:pointer;' +
+            'font:13px/1.2 sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.3)';
+        btn.addEventListener('click', function () {
+            if (!window.confirm('Clear ALL stored profiler results (every captured API call)?')) return;
+            btn.disabled = true;
+            btn.textContent = 'Clearing…';
+            fetch('__CLEARPATH__', { method: 'POST', headers: { 'X-Requested-With': 'fetch' } })
+                .then(function () { window.location.reload(); })
+                .catch(function () { btn.disabled = false; btn.textContent = '🗑 Clear all profiler results'; alert('Clear failed.'); });
+        });
+        document.body.appendChild(btn);
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', addButton);
+    } else {
+        addButton();
+    }
+})();
+</script>
+""";
+
+        return template.Replace("__CLEARPATH__", clearPath);
+    }
+
     public async Task Invoke(HttpContext context)
     {
         var path = context.Request.Path.Value ?? string.Empty;
+
+        // Handle the "clear all results" endpoint before anything else.
+        if (_options.EnableClearCacheButton
+            && path.Equals(_clearPath, StringComparison.OrdinalIgnoreCase))
+        {
+            _storage?.Clear();
+            context.Response.StatusCode = StatusCodes.Status204NoContent;
+            return;
+        }
+
         if (!path.Contains(_resultsPath, StringComparison.OrdinalIgnoreCase))
         {
             await _next(context);
             return;
         }
+
+        var isResultsIndex = path.Contains(_resultsIndexPath, StringComparison.OrdinalIgnoreCase);
 
         var originalBody = context.Response.Body;
         using var buffer = new MemoryStream();
@@ -128,9 +186,15 @@ internal sealed class ProfilerIdeLinkMiddleware
             {
                 var html = await new StreamReader(buffer, Encoding.UTF8).ReadToEndAsync();
 
+                var injection = _script;
+                if (isResultsIndex && _options.EnableClearCacheButton)
+                {
+                    injection += _clearButtonScript;
+                }
+
                 html = html.Contains("</body>", StringComparison.OrdinalIgnoreCase)
-                    ? html.Replace("</body>", _script + "</body>")
-                    : html + _script;
+                    ? html.Replace("</body>", injection + "</body>")
+                    : html + injection;
 
                 var bytes = Encoding.UTF8.GetBytes(html);
                 context.Response.ContentLength = bytes.Length;

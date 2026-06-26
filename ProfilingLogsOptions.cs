@@ -16,7 +16,11 @@ public enum ProfilingIde
     /// <summary>JetBrains Rider: <c>jetbrains://rider/navigate/reference?path={path}&amp;line={line}</c></summary>
     Rider,
 
-    /// <summary>Visual studio: <c>visualstudio://file?path={path}&amp;line={line}</c></summary>
+    /// <summary>
+    /// Visual Studio: <c>devenv://open?file={path}&amp;line={line}</c>.
+    /// Visual Studio has no native URL scheme, so this requires a one-time protocol-handler
+    /// registration on the machine (see <c>tools/</c> in the repository).
+    /// </summary>
     VisualStudio,
 
     /// <summary>Use the custom template defined in <see cref="ProfilingLogsOptions.IdeUrlFormat"/>.</summary>
@@ -50,6 +54,12 @@ public sealed class ProfilingLogsOptions
     /// <summary>Hide the default <c>sql - Open/Close</c> rows produced by MiniProfiler.EntityFrameworkCore.</summary>
     public bool HideDefaultConnRows { get; set; } = true;
 
+    /// <summary>
+    /// Show a "Clear all profiler results" button on the <c>{RouteBasePath}/results-index</c> page
+    /// that wipes every stored profiling result (all captured API calls).
+    /// </summary>
+    public bool EnableClearCacheButton { get; set; } = true;
+
     /// <summary>Only walk stack frames whose type namespace contains this value. Defaults to <c>"Services"</c>.</summary>
     public string SqlNamespaceFilter { get; set; } = "Services";
 
@@ -77,7 +87,7 @@ public sealed class ProfilingLogsOptions
         ProfilingIde.VSCode => "vscode://file/{path}:{line}",
         ProfilingIde.Cursor => "cursor://file/{path}:{line}",
         ProfilingIde.Rider => "jetbrains://rider/navigate/reference?path={path}&line={line}",
-        ProfilingIde.VisualStudio => "visualstudio://file/{path}?line={line}",
+        ProfilingIde.VisualStudio => "devenv://open?file={path}&line={line}",
         _ => "vscode://file/{path}:{line}"
     };
 
@@ -100,9 +110,37 @@ public sealed class ProfilingLogsOptions
         }
 
         return ResolveIdeFormat()
-            .Replace("{path}", path)
+            .Replace("{path}", EncodePath(path))
             .Replace("{line}", line.ToString())
             .Replace("{col}", "1");
+    }
+
+    /// <summary>
+    /// URL-encodes a forward-slash path so the deep-link stays a single token. Spaces (and other
+    /// unsafe characters) are percent-encoded; the path separators <c>/</c> and a leading Windows
+    /// drive letter (e.g. <c>D:</c>) are preserved. Without this, a path containing a space would be
+    /// truncated by the client-side linkify regex and the IDE link would not open.
+    /// </summary>
+    private static string EncodePath(string path)
+    {
+        var segments = path.Split('/');
+        for (var i = 0; i < segments.Length; i++)
+        {
+            if (segments[i].Length == 0)
+            {
+                continue;
+            }
+
+            // Preserve a leading Windows drive letter like "D:" (do not encode the colon).
+            if (i == 0 && segments[i].Length == 2 && char.IsLetter(segments[i][0]) && segments[i][1] == ':')
+            {
+                continue;
+            }
+
+            segments[i] = Uri.EscapeDataString(segments[i]);
+        }
+
+        return string.Join("/", segments);
     }
 
     /// <summary>The deep-link scheme (the part before <c>://</c>) used by the client-side linkify regex.</summary>

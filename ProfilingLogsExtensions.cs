@@ -54,6 +54,10 @@ public static class ProfilingLogsExtensions
             return services;
         }
 
+        // Custom storage so the results-index "Clear all" button can flush every stored result.
+        var storage = new ClearableMemoryStorage();
+        services.AddSingleton(storage);
+
         services.AddMiniProfiler(mp =>
         {
             mp.RouteBasePath = options.RouteBasePath;
@@ -65,6 +69,7 @@ public static class ProfilingLogsExtensions
             mp.PopupRenderPosition = RenderPosition.BottomLeft;
             mp.PopupShowTrivial = true;
             mp.TrivialDurationThresholdMilliseconds = 1.0M;
+            mp.Storage = storage;
         }).AddEntityFramework();
 
         return services;
@@ -86,7 +91,7 @@ public static class ProfilingLogsExtensions
             DiagnosticListener.AllListeners.Subscribe(new ProfilingDiagnosticObserver(options));
         }
 
-        if (options.EnableVsCodeLinks || options.HideDefaultConnRows)
+        if (options.EnableVsCodeLinks || options.HideDefaultConnRows || options.EnableClearCacheButton)
         {
             app.UseMiddleware<ProfilerIdeLinkMiddleware>(options);
         }
