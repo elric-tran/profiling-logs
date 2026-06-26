@@ -37,10 +37,10 @@ public class ExampleService
 
     public ExampleService(AppDbContext db) => _db = db;
 
-    public async Task<List<Patient>> GetActivePatientsAsync(Guid orgId)
+    public async Task<List<User>> GetActiveUsersAsync()
     {
-        return await _db.Patients                       // Line 27
-            .Where(p => p.OrgId == orgId && p.IsActive)
+        return await _db.Users                       // Line 27
+            .Where(p => p.IsActive)
             .ToListAsync();
     }
 }
@@ -50,11 +50,11 @@ The captured EF Core query is annotated with the caller's `File (Line) -> Method
 deep-link, so the profiler output looks like:
 
 ```sql
--- 🔗 From: Example.Service.cs (Line 27) -> GetActivePatientsAsync
+-- 🔗 From: Example.Service.cs (Line 27) -> GetActiveUsersAsync
 -- 🔗 vscode://file/C:/src/MyApp/Services/Example.Service.cs:27
-SELECT [p].[Id], [p].[OrgId], [p].[IsActive]
-FROM [Patients] AS [p]
-WHERE [p].[OrgId] = @__orgId_0 AND [p].[IsActive] = CAST(1 AS bit);
+SELECT [p].[Id], [p].[IsActive]
+FROM [Users] AS [p]
+WHERE [p].[IsActive] = CAST(1 AS bit);
 ```
 
 On the results page (`{RouteBasePath}/results-index`) the `vscode://file/...:27` link is rendered
@@ -113,8 +113,9 @@ View results at `{RouteBasePath}/results-index` (default `/profiler/results-inde
 | `EnableConnectionColors` | `true` | Color markers for connection Open/Close. |
 | `EnableCallerComment` | `true` | Inject `-- 🔗 From ...` comment into SQL. |
 | `HideDefaultConnRows` | `true` | Hide default `sql - Open/Close` rows. |
+| `EnableClearCacheButton` | `true` | Show a "Clear all profiler results" button on the results-index page. |
 | `SqlNamespaceFilter` | `"Services"` | Only walk stack frames whose type namespace contains this. |
-| `Ide` | `VSCode` | `VSCode` / `Cursor` / `Rider` / `Custom`. |
+| `Ide` | `VSCode` | `VSCode` / `Cursor` / `Rider` / `VisualStudio` / `Custom`. |
 | `IdeUrlFormat` | `null` | Custom template, overrides preset. Placeholders `{path}` `{line}` `{col}`. |
 | `PathMap` | `null` | Map remote→local path prefixes (viewing from another machine). |
 | `ColorScheme` | `Dark` | MiniProfiler color scheme. |
@@ -122,7 +123,9 @@ View results at `{RouteBasePath}/results-index` (default `/profiler/results-inde
 ## Notes / Caveats
 
 - `EnableCallerComment` appends a comment to the **executed** SQL text. This is valid T-SQL but changes the command text per call-site, which can reduce query-plan reuse. Keep it gated behind `Enabled = IsDevelopment()`.
-- IDE deep-links only resolve correctly when the browser runs on the **same machine** as the source (or `PathMap` is configured).
+- IDE deep-links only resolve correctly when the browser runs on the **same machine** as the source (or `PathMap` is configured). Paths containing spaces are URL-encoded automatically.
+- `ProfilingIde.VisualStudio` uses a `devenv://` link. Visual Studio has no native URL scheme, so it requires a one-time protocol-handler registration — see [`tools/README.md`](tools/README.md). `VSCode` / `Cursor` / `Rider` work out of the box.
+- The results-index page shows a **Clear all profiler results** button (top-right) that wipes every captured request. Disable it with `EnableClearCacheButton = false`.
 - GitHub Packages requires authentication (PAT) even for public packages when restoring.
 
 ## Target frameworks
