@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using ProfilingLogs.Internal;
@@ -54,6 +56,10 @@ public static class ProfilingLogsExtensions
             return services;
         }
 
+        // Custom storage so the results-index "Clear all" button can flush every stored result.
+        var storage = new ClearableMemoryStorage();
+        services.AddSingleton(storage);
+
         services.AddMiniProfiler(mp =>
         {
             mp.RouteBasePath = options.RouteBasePath;
@@ -65,6 +71,7 @@ public static class ProfilingLogsExtensions
             mp.PopupRenderPosition = RenderPosition.BottomLeft;
             mp.PopupShowTrivial = true;
             mp.TrivialDurationThresholdMilliseconds = 1.0M;
+            mp.Storage = storage;
         }).AddEntityFramework();
 
         return services;
@@ -86,12 +93,74 @@ public static class ProfilingLogsExtensions
             DiagnosticListener.AllListeners.Subscribe(new ProfilingDiagnosticObserver(options));
         }
 
-        if (options.EnableVsCodeLinks || options.HideDefaultConnRows)
+        if (options.EnableVsCodeLinks || options.HideDefaultConnRows || options.EnableClearCacheButton)
         {
             app.UseMiddleware<ProfilerIdeLinkMiddleware>(options);
         }
 
         app.UseMiniProfiler();
+
+        // Runs downstream of MiniProfiler (inside the profiled pipeline). After the endpoint has
+        // executed, MiniProfiler.Current is set and routing info is available, so we enrich the
+        // profiler name with the HTTP verb. MiniProfiler's EnsureName only assigns a name when it
+        // is still empty, so setting it here is preserved.
+        if (options.EnableHttpMethodColumn)
+        {
+            app.Use(async (context, next) =>
+            {
+                await next();
+                SetRequestName(context);
+            });
+        }
+
         return app;
+    }
+
+    private static void SetRequestName(HttpContext context)
+    {
+        var mp = MiniProfiler.Current;
+        if (mp is null)
+        {
+            return;
+        }
+
+        var method = context.Request.Method;
+        if (string.IsNullOrEmpty(method))
+        {
+            return;
+        }
+
+        var name = context.Request.Path.Value ?? string.Empty;
+        var routeData = context.GetRouteData();
+        if (routeData is not null && routeData.Values.TryGetValue("controller", out var controller) && controller is not null)
+        {
+            routeData.Values.TryGetValue("action", out var action);
+            name = routeData.Values.TryGetValue("area", out var area) && area is not null && area.ToString()!.Length > 0
+                ? $"{area}/{controller}/{action}"
+                : $"{controller}/{action}";
+        }
+        else if (routeData is not null && routeData.Values.TryGetValue("page", out var page) && page is not null)
+        {
+            name = page.ToString() ?? name;
+        }
+        else
+        {
+            var endpoint = context.GetEndpoint();
+            if (endpoint is not null && !string.IsNullOrEmpty(endpoint.DisplayName))
+            {
+                name = endpoint.DisplayName;
+            }
+        }
+
+        // Minimal-API endpoint display names carry a "HTTP: GET /path" prefix; strip it so we
+        // don't produce "GET HTTP: GET /path".
+        if (name.StartsWith("HTTP: ", StringComparison.OrdinalIgnoreCase))
+        {
+            name = name.Substring("HTTP: ".Length);
+        }
+
+        mp.Name = name.StartsWith(method + " ", StringComparison.OrdinalIgnoreCase)
+            ? name
+            : $"{method} {name}";
     }
 }
