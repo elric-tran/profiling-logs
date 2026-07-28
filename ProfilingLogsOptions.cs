@@ -60,6 +60,13 @@ public sealed class ProfilingLogsOptions
     /// </summary>
     public bool EnableClearCacheButton { get; set; } = true;
 
+    /// <summary>
+    /// Prefix each profiled request's name with its HTTP verb (e.g. <c>GET controller/action</c>) and
+    /// show a dedicated "Method" column on the <c>results-index</c> table. MiniProfiler does not record
+    /// the HTTP method, so this enriches the profiler name at request time to make it available.
+    /// </summary>
+    public bool EnableHttpMethodColumn { get; set; } = true;
+
     /// <summary>Only walk stack frames whose type namespace contains this value. Defaults to <c>"Services"</c>.</summary>
     public string SqlNamespaceFilter { get; set; } = "Services";
 

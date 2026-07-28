@@ -76,8 +76,8 @@ using ProfilingLogs;
 // Program.cs
 builder.Services.AddProfilingLogs(o =>
 {
-    o.Enabled = builder.Environment.IsDevelopment(); // flag from outside
-    o.Ide     = ProfilingIde.VSCode;                 // default
+    o.Enabled = builder.Environment.IsDevelopment();  // flag from outside
+    o.Ide = ProfilingIde.VSCode;                      // default
 });
 
 var app = builder.Build();
@@ -101,7 +101,8 @@ builder.Services.AddProfilingLogs(builder.Configuration.GetSection("ProfilingLog
 }
 ```
 
-View results at `{RouteBasePath}/results-index` (default `/profiler/results-index`).
+View results at `{your-local-api}/{RouteBasePath}/results-index` (default `{your-local-api}/profiler/results-index`).
+example: `http://localhost:3000/profiler/results-index`
 
 ## Options
 
@@ -131,3 +132,9 @@ View results at `{RouteBasePath}/results-index` (default `/profiler/results-inde
 ## Target frameworks
 
 `net8.0`, `net9.0`, `net10.0`.
+
+## ☕ Support [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/kiettranvq)
+
+If you find this project useful and would like to support its development, consider buying me a coffee! Your support helps keep this project maintained and improved. 
+
+<a href="https://buymeacoffee.com/kiettranvq" target="_blank"><img src="by-me-a-coffee.png" alt="Buy Me A Coffee" style="height: 196px !important;width: 196px !important;" ></a>
