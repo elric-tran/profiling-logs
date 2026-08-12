@@ -7,10 +7,10 @@
     <LangVersion>latest</LangVersion>
 
     <PackageId>ProfilingLogs</PackageId>
-    <Version>1.0.300-local1</Version>
+    <Version>1.0.3</Version>
     <Authors>Elric</Authors>
-    <Description>MiniProfiler-based SQL profiling for ASP.NET Core: per-connection color markers, caller source-line comments injected into SQL, and clickable IDE deep-links (VSCode/Cursor/Rider) inside the profiler results page. Production-safe: everything is a no-op unless Enabled is set.</Description>
-    <PackageTags>miniprofiler;profiling;sql;efcore;logging;diagnostics</PackageTags>
+    <Description>Standalone SQL profiling for ASP.NET Core: per-connection color markers, caller source-line comments injected into SQL, and clickable IDE deep-links (VSCode/Cursor/Rider) with a built-in React UI. Production-safe: everything is a no-op unless Enabled is set.</Description>
+    <PackageTags>profiling;sql;efcore;logging;diagnostics</PackageTags>
     <RepositoryUrl>https://github.com/elric-tran/profiling-logs</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -25,8 +25,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="MiniProfiler.AspNetCore.Mvc" Version="4.5.4" />
-    <PackageReference Include="MiniProfiler.EntityFrameworkCore" Version="4.5.4" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>

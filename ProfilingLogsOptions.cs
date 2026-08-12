@@ -1,5 +1,3 @@
-using StackExchange.Profiling;
-
 namespace ProfilingLogs;
 
 /// <summary>
@@ -34,12 +32,12 @@ public enum ProfilingIde
 public sealed class ProfilingLogsOptions
 {
     /// <summary>
-    /// Master switch. When false, MiniProfiler is not registered, no DiagnosticListener is subscribed,
-    /// and no middleware is added. Pass <c>builder.Environment.IsDevelopment()</c> here.
+    /// Master switch. When false, no DiagnosticListener is subscribed and no middleware is added.
+    /// Pass <c>builder.Environment.IsDevelopment()</c> here.
     /// </summary>
     public bool Enabled { get; set; } = false;
 
-    /// <summary>MiniProfiler base path. Defaults to <c>/profiler</c>.</summary>
+    /// <summary>Base path for the profiler UI and API. Defaults to <c>/profiler</c>.</summary>
     public string RouteBasePath { get; set; } = "/profiler";
 
     /// <summary>Turn the IDE deep-link text on the results page into clickable &lt;a&gt; anchors.</summary>
@@ -51,7 +49,7 @@ public sealed class ProfilingLogsOptions
     /// <summary>Inject a <c>-- 🔗 From ...</c> comment (with an IDE deep-link) into the SQL text.</summary>
     public bool EnableCallerComment { get; set; } = true;
 
-    /// <summary>Hide the default <c>sql - Open/Close</c> rows produced by MiniProfiler.EntityFrameworkCore.</summary>
+    /// <summary>Hide the connection Open/Close events from the UI display.</summary>
     public bool HideDefaultConnRows { get; set; } = true;
 
     /// <summary>
@@ -62,8 +60,7 @@ public sealed class ProfilingLogsOptions
 
     /// <summary>
     /// Prefix each profiled request's name with its HTTP verb (e.g. <c>GET controller/action</c>) and
-    /// show a dedicated "Method" column on the <c>results-index</c> table. MiniProfiler does not record
-    /// the HTTP method, so this enriches the profiler name at request time to make it available.
+    /// show a dedicated "Method" column on the <c>results-index</c> table.
     /// </summary>
     public bool EnableHttpMethodColumn { get; set; } = true;
 
@@ -85,8 +82,8 @@ public sealed class ProfilingLogsOptions
     /// </summary>
     public IDictionary<string, string>? PathMap { get; set; }
 
-    /// <summary>MiniProfiler color scheme. Defaults to <see cref="ColorScheme.Dark"/>.</summary>
-    public ColorScheme ColorScheme { get; set; } = ColorScheme.Dark;
+    /// <summary>UI color scheme. Defaults to Dark.</summary>
+    public string ColorScheme { get; set; } = "Dark";
 
     /// <summary>Returns the effective URL template (prefers <see cref="IdeUrlFormat"/>, then the preset).</summary>
     internal string ResolveIdeFormat() => IdeUrlFormat ?? Ide switch
