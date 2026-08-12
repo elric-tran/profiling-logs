@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
-using StackExchange.Profiling;
 
 namespace ProfilingLogs.Internal;
 
@@ -24,10 +23,12 @@ internal sealed class ProfilingConnectionTracker : IObserver<KeyValuePair<string
     private static readonly ConcurrentDictionary<string, ConcurrentStack<string>> OpenColors = new();
 
     private readonly ProfilingLogsOptions _options;
+    private readonly ProfilingStore? _store;
 
-    public ProfilingConnectionTracker(ProfilingLogsOptions options)
+    public ProfilingConnectionTracker(ProfilingLogsOptions options, ProfilingStore? store = null)
     {
         _options = options;
+        _store = store;
     }
 
     private static string NextColor()
@@ -45,7 +46,16 @@ internal sealed class ProfilingConnectionTracker : IObserver<KeyValuePair<string
                 var connId = openData.Connection.GetHashCode().ToString("X");
                 var color = NextColor();
                 OpenColors.GetOrAdd(connId, _ => new ConcurrentStack<string>()).Push(color);
-                MiniProfiler.Current?.CustomTiming("sql-connection-open", $"{color} [CONN OPEN] -> Id: #{connId}");
+
+                ProfilingStore.CurrentRequest.Value?.ConnectionEvents.Add(
+                    $"{color} [CONN OPEN] -> Id: #{connId}");
+
+                if (_store != null && string.IsNullOrEmpty(_store.CapturedConnectionString))
+                {
+                    var cs = openData.Connection.ConnectionString;
+                    if (!string.IsNullOrEmpty(cs))
+                        _store.CapturedConnectionString = cs;
+                }
             }
             else if (value.Key == RelationalEventId.ConnectionClosed.Name && value.Value is ConnectionEndEventData closeData)
             {
@@ -55,7 +65,9 @@ internal sealed class ProfilingConnectionTracker : IObserver<KeyValuePair<string
                 {
                     color = matched;
                 }
-                MiniProfiler.Current?.CustomTiming("sql-connection-close", $"{color} [CONN CLOSE] <- Id: #{connId}")?.Stop();
+
+                ProfilingStore.CurrentRequest.Value?.ConnectionEvents.Add(
+                    $"{color} [CONN CLOSE] <- Id: #{connId}");
             }
         }
 
@@ -74,13 +86,6 @@ internal sealed class ProfilingConnectionTracker : IObserver<KeyValuePair<string
 
     private sealed class CallerBox { public CallerInfo? Value; }
 
-    // Remembers the caller resolved for each physical DbConnection. EF Core creates the DbCommand
-    // synchronously, but for patterns like `await CountAsync(); await ToListAsync();` (e.g. a
-    // ToPagedListAsync helper) the second command runs on a thread-pool continuation *after* an
-    // await, so the caller's Services frame is no longer on the stack - and an AsyncLocal set during
-    // the first command does not flow across EF's internal async boundaries either. Both commands
-    // run on the same DbContext/DbConnection, so keying the last resolved caller on the connection
-    // lets the second query inherit it. The ConditionalWeakTable never keeps a connection alive.
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<System.Data.Common.DbConnection, CallerBox> ConnectionCallers = new();
 
     private void AppendCallerComment(CommandEventData commandData)
@@ -91,24 +96,15 @@ internal sealed class ProfilingConnectionTracker : IObserver<KeyValuePair<string
             return;
         }
 
-        // Already annotated (e.g. at CommandInitialized) - don't append twice at CommandExecuting.
         if (command.CommandText.Contains(CallerMarker, StringComparison.Ordinal))
         {
             return;
         }
 
-        // NOTE: EF Core builds the command (CommandInitialized) synchronously *before*
-        // `await connection.OpenAsync(...)`. For async queries against a not-yet-open
-        // connection, the open awaits and the later CommandExecuting event resumes on a
-        // thread-pool continuation whose stack no longer contains the caller frames - so
-        // walking the stack there finds nothing and no link is produced. Capturing at
-        // CommandInitialized keeps the caller's synchronous stack intact, which is why the
-        // link now resolves for both already-open (sync) and freshly-opened (async) connections.
         var caller = ResolveCallerFromStack();
         var connection = command.Connection;
         if (caller != null)
         {
-            // Fresh, accurate caller - remember it for later commands on this connection.
             if (connection != null)
             {
                 ConnectionCallers.GetValue(connection, _ => new CallerBox()).Value = caller;
@@ -116,8 +112,6 @@ internal sealed class ProfilingConnectionTracker : IObserver<KeyValuePair<string
         }
         else if (connection != null && ConnectionCallers.TryGetValue(connection, out var box))
         {
-            // No Services frame on the stack (e.g. a query materialized past an await inside a
-            // helper). Fall back to the caller captured for the previous command on this connection.
             caller = box.Value;
         }
 
@@ -127,11 +121,119 @@ internal sealed class ProfilingConnectionTracker : IObserver<KeyValuePair<string
         }
 
         var ideLink = _options.BuildIdeLink(caller.FullPath, caller.LineNumber);
+
+        // Record the query in the current profiled request
+        var currentRequest = ProfilingStore.CurrentRequest.Value;
+        if (currentRequest != null)
+        {
+            var connHashId = connection?.GetHashCode().ToString("X");
+            string? connColor = null;
+            if (connHashId != null && OpenColors.TryGetValue(connHashId, out var stack) && stack.TryPeek(out var color))
+            {
+                connColor = color;
+            }
+
+            var parameters = ExtractParameters(command);
+
+            currentRequest.Queries.Add(new ProfiledQuery(
+                Sql: command.CommandText,
+                DurationMs: 0,
+                CallerFile: caller.FileName,
+                CallerLine: caller.LineNumber,
+                CallerMethod: caller.MethodName,
+                IdeLink: ideLink,
+                ConnColor: connColor,
+                ConnId: connHashId,
+                ConnEvent: connColor != null ? "OPEN" : null,
+                Parameters: parameters));
+        }
+
         command.CommandText =
             command.CommandText + "\r\n\n" +
             $"{CallerMarker} {caller.FileName} (Line {caller.LineNumber}) -> {caller.MethodName}\r\n" +
             $"-- {ideLink}\r\n";
     }
+
+    private static List<ProfiledParameter>? ExtractParameters(System.Data.Common.DbCommand command)
+    {
+        if (command.Parameters.Count == 0)
+            return null;
+
+        var list = new List<ProfiledParameter>(command.Parameters.Count);
+        foreach (System.Data.Common.DbParameter p in command.Parameters)
+        {
+            var name = p.ParameterName;
+            var sqlType = MapDbTypeToSql(p.DbType, p.Size);
+            string? val;
+            if (p.Value == null || p.Value == DBNull.Value)
+            {
+                val = "NULL";
+            }
+            else
+            {
+                val = p.DbType switch
+                {
+                    System.Data.DbType.String or
+                    System.Data.DbType.StringFixedLength =>
+                        $"N'{EscapeSqlString(p.Value.ToString())}'",
+
+                    System.Data.DbType.AnsiString or
+                    System.Data.DbType.AnsiStringFixedLength =>
+                        $"'{EscapeSqlString(p.Value.ToString())}'",
+
+                    System.Data.DbType.Xml => $"N'{EscapeSqlString(p.Value.ToString())}'",
+
+                    System.Data.DbType.Date => $"'{((DateTime)p.Value):yyyy-MM-dd}'",
+
+                    System.Data.DbType.DateTime or
+                    System.Data.DbType.DateTime2 => $"'{((DateTime)p.Value):yyyy-MM-ddTHH:mm:ss.fff}'",
+
+                    System.Data.DbType.DateTimeOffset =>
+                        $"'{((DateTimeOffset)p.Value):yyyy-MM-ddTHH:mm:ss.fffffffzzz}'",
+
+                    System.Data.DbType.Time => $"'{p.Value}'",
+
+                    System.Data.DbType.Boolean => (bool)p.Value ? "1" : "0",
+
+                    System.Data.DbType.Guid => $"'{p.Value}'",
+
+                    _ => p.Value.ToString()
+                };
+            }
+            list.Add(new ProfiledParameter(name, sqlType, val));
+        }
+        return list;
+    }
+
+    private static string MapDbTypeToSql(System.Data.DbType dbType, int size)
+    {
+        var sizeSpec = size > 0 && size < 8000 ? $"({size})" : "(max)";
+        return dbType switch
+        {
+            System.Data.DbType.Boolean => "bit",
+            System.Data.DbType.Byte => "tinyint",
+            System.Data.DbType.Int16 => "smallint",
+            System.Data.DbType.Int32 => "int",
+            System.Data.DbType.Int64 => "bigint",
+            System.Data.DbType.Single => "real",
+            System.Data.DbType.Double => "float",
+            System.Data.DbType.Decimal or System.Data.DbType.Currency => "decimal(18,2)",
+            System.Data.DbType.String or System.Data.DbType.StringFixedLength => $"nvarchar{sizeSpec}",
+            System.Data.DbType.AnsiString or System.Data.DbType.AnsiStringFixedLength => $"varchar{sizeSpec}",
+            System.Data.DbType.Guid => "uniqueidentifier",
+            System.Data.DbType.Date => "date",
+            System.Data.DbType.DateTime => "datetime",
+            System.Data.DbType.DateTime2 => "datetime2",
+            System.Data.DbType.DateTimeOffset => "datetimeoffset",
+            System.Data.DbType.Time => "time",
+            System.Data.DbType.Binary => $"varbinary{sizeSpec}",
+            System.Data.DbType.Xml => "xml",
+            _ => "sql_variant"
+        };
+    }
+
+    private static string? EscapeSqlString(string? value) =>
+        value?.Replace("'", "''");
 
     private CallerInfo? ResolveCallerFromStack()
     {
@@ -167,11 +269,6 @@ internal sealed class ProfilingConnectionTracker : IObserver<KeyValuePair<string
         return null;
     }
 
-    /// <summary>
-    /// Async methods appear on the stack as the compiler-generated state machine's
-    /// <c>MoveNext</c>. Recover the original method name from the state-machine type
-    /// (e.g. <c>&lt;GetIncidentsAsync&gt;d__12</c> -> <c>GetIncidentsAsync</c>).
-    /// </summary>
     private static string? GetFriendlyMethodName(System.Reflection.MethodBase? method)
     {
         var typeName = method?.DeclaringType?.Name;
@@ -199,17 +296,19 @@ internal sealed class ProfilingConnectionTracker : IObserver<KeyValuePair<string
 internal sealed class ProfilingDiagnosticObserver : IObserver<DiagnosticListener>
 {
     private readonly ProfilingLogsOptions _options;
+    private readonly ProfilingStore? _store;
 
-    public ProfilingDiagnosticObserver(ProfilingLogsOptions options)
+    public ProfilingDiagnosticObserver(ProfilingLogsOptions options, ProfilingStore? store = null)
     {
         _options = options;
+        _store = store;
     }
 
     public void OnNext(DiagnosticListener value)
     {
         if (value.Name == DbLoggerCategory.Name)
         {
-            value.Subscribe(new ProfilingConnectionTracker(_options));
+            value.Subscribe(new ProfilingConnectionTracker(_options, _store));
         }
     }
 
