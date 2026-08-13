@@ -7,7 +7,7 @@
     <LangVersion>latest</LangVersion>
 
     <PackageId>ProfilingLogs</PackageId>
-    <Version>1.0.3</Version>
+    <Version>1.0.4</Version>
     <Authors>Elric</Authors>
     <Description>Standalone SQL profiling for ASP.NET Core: per-connection color markers, caller source-line comments injected into SQL, and clickable IDE deep-links (VSCode/Cursor/Rider) with a built-in React UI. Production-safe: everything is a no-op unless Enabled is set.</Description>
     <PackageTags>profiling;sql;efcore;logging;diagnostics</PackageTags>
