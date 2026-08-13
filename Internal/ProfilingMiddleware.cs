@@ -35,14 +35,24 @@ internal sealed class ProfilingMiddleware
         }
         finally
         {
-            sw.Stop();
-            request.DurationMs = sw.Elapsed.TotalMilliseconds;
-            request.StatusCode = context.Response.StatusCode;
+            try
+            {
+                sw.Stop();
+                request.DurationMs = sw.Elapsed.TotalMilliseconds;
+                request.StatusCode = context.Response.StatusCode;
 
-            EnrichRequestName(context, request);
+                EnrichRequestName(context, request);
 
-            _store.Save(request);
-            ProfilingStore.CurrentRequest.Value = null;
+                _store.Save(request);
+            }
+            catch
+            {
+                // Profiling must never interfere with the real request pipeline
+            }
+            finally
+            {
+                ProfilingStore.CurrentRequest.Value = null;
+            }
         }
     }
 

@@ -1,6 +1,6 @@
 # ProfilingLogs
 
-MiniProfiler-based SQL profiling for ASP.NET Core + EF Core, with developer-friendly extras.
+SQL profiling for ASP.NET Core + EF Core, with developer-friendly extras.
 
 ## Why ProfilingLogs?
 
@@ -109,7 +109,7 @@ example: `http://localhost:3000/profiler/results-index`
 | Option | Default | Description |
 |---|---|---|
 | `Enabled` | `false` | Master switch. Pass `IsDevelopment()`. When false everything is a no-op. |
-| `RouteBasePath` | `/profiler` | MiniProfiler base path. |
+| `RouteBasePath` | `/profiler` | Profiler base path. |
 | `EnableVsCodeLinks` | `true` | Linkify IDE deep-links in the results page. |
 | `EnableConnectionColors` | `true` | Color markers for connection Open/Close. |
 | `EnableCallerComment` | `true` | Inject `-- 🔗 From ...` comment into SQL. |
@@ -119,7 +119,7 @@ example: `http://localhost:3000/profiler/results-index`
 | `Ide` | `VSCode` | `VSCode` / `Cursor` / `Rider` / `VisualStudio` / `Custom`. |
 | `IdeUrlFormat` | `null` | Custom template, overrides preset. Placeholders `{path}` `{line}` `{col}`. |
 | `PathMap` | `null` | Map remote→local path prefixes (viewing from another machine). |
-| `ColorScheme` | `Dark` | MiniProfiler color scheme. |
+| `ColorScheme` | `Dark` | Profiler color scheme. |
 
 ## Notes / Caveats
 

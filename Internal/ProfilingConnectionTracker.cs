@@ -39,44 +39,51 @@ internal sealed class ProfilingConnectionTracker : IObserver<KeyValuePair<string
 
     public void OnNext(KeyValuePair<string, object?> value)
     {
-        if (_options.EnableConnectionColors)
+        try
         {
-            if (value.Key == RelationalEventId.ConnectionOpening.Name && value.Value is ConnectionEventData openData)
+            if (_options.EnableConnectionColors)
             {
-                var connId = openData.Connection.GetHashCode().ToString("X");
-                var color = NextColor();
-                OpenColors.GetOrAdd(connId, _ => new ConcurrentStack<string>()).Push(color);
-
-                ProfilingStore.CurrentRequest.Value?.ConnectionEvents.Add(
-                    $"{color} [CONN OPEN] -> Id: #{connId}");
-
-                if (_store != null && string.IsNullOrEmpty(_store.CapturedConnectionString))
+                if (value.Key == RelationalEventId.ConnectionOpening.Name && value.Value is ConnectionEventData openData)
                 {
-                    var cs = openData.Connection.ConnectionString;
-                    if (!string.IsNullOrEmpty(cs))
-                        _store.CapturedConnectionString = cs;
+                    var connId = openData.Connection.GetHashCode().ToString("X");
+                    var color = NextColor();
+                    OpenColors.GetOrAdd(connId, _ => new ConcurrentStack<string>()).Push(color);
+
+                    ProfilingStore.CurrentRequest.Value?.ConnectionEvents.Add(
+                        $"{color} [CONN OPEN] -> Id: #{connId}");
+
+                    if (_store != null && string.IsNullOrEmpty(_store.CapturedConnectionString))
+                    {
+                        var cs = openData.Connection.ConnectionString;
+                        if (!string.IsNullOrEmpty(cs))
+                            _store.CapturedConnectionString = cs;
+                    }
+                }
+                else if (value.Key == RelationalEventId.ConnectionClosed.Name && value.Value is ConnectionEndEventData closeData)
+                {
+                    var connId = closeData.Connection.GetHashCode().ToString("X");
+                    var color = "⚪";
+                    if (OpenColors.TryGetValue(connId, out var stack) && stack.TryPop(out var matched))
+                    {
+                        color = matched;
+                    }
+
+                    ProfilingStore.CurrentRequest.Value?.ConnectionEvents.Add(
+                        $"{color} [CONN CLOSE] <- Id: #{connId}");
                 }
             }
-            else if (value.Key == RelationalEventId.ConnectionClosed.Name && value.Value is ConnectionEndEventData closeData)
-            {
-                var connId = closeData.Connection.GetHashCode().ToString("X");
-                var color = "⚪";
-                if (OpenColors.TryGetValue(connId, out var stack) && stack.TryPop(out var matched))
-                {
-                    color = matched;
-                }
 
-                ProfilingStore.CurrentRequest.Value?.ConnectionEvents.Add(
-                    $"{color} [CONN CLOSE] <- Id: #{connId}");
+            if (_options.EnableCallerComment
+                && (value.Key == RelationalEventId.CommandInitialized.Name
+                    || value.Key == RelationalEventId.CommandExecuting.Name)
+                && value.Value is CommandEventData commandData)
+            {
+                AppendCallerComment(commandData);
             }
         }
-
-        if (_options.EnableCallerComment
-            && (value.Key == RelationalEventId.CommandInitialized.Name
-                || value.Key == RelationalEventId.CommandExecuting.Name)
-            && value.Value is CommandEventData commandData)
+        catch
         {
-            AppendCallerComment(commandData);
+            // Profiling must never interfere with the real database operations
         }
     }
 
@@ -156,53 +163,136 @@ internal sealed class ProfilingConnectionTracker : IObserver<KeyValuePair<string
 
     private static List<ProfiledParameter>? ExtractParameters(System.Data.Common.DbCommand command)
     {
-        if (command.Parameters.Count == 0)
-            return null;
-
-        var list = new List<ProfiledParameter>(command.Parameters.Count);
-        foreach (System.Data.Common.DbParameter p in command.Parameters)
+        try
         {
-            var name = p.ParameterName;
-            var sqlType = MapDbTypeToSql(p.DbType, p.Size);
-            string? val;
-            if (p.Value == null || p.Value == DBNull.Value)
+            if (command.Parameters.Count == 0)
+                return null;
+
+            var list = new List<ProfiledParameter>(command.Parameters.Count);
+            foreach (System.Data.Common.DbParameter p in command.Parameters)
             {
-                val = "NULL";
-            }
-            else
-            {
-                val = p.DbType switch
+                var name = p.ParameterName;
+                var sqlType = MapDbTypeToSql(p.DbType, p.Size);
+                string? val;
+                if (p.Value == null || p.Value == DBNull.Value)
                 {
-                    System.Data.DbType.String or
-                    System.Data.DbType.StringFixedLength =>
-                        $"N'{EscapeSqlString(p.Value.ToString())}'",
+                    val = "NULL";
+                }
+                else
+                {
+                    val = p.DbType switch
+                    {
+                        System.Data.DbType.String or
+                        System.Data.DbType.StringFixedLength =>
+                            $"N'{EscapeSqlString(p.Value.ToString())}'",
 
-                    System.Data.DbType.AnsiString or
-                    System.Data.DbType.AnsiStringFixedLength =>
-                        $"'{EscapeSqlString(p.Value.ToString())}'",
+                        System.Data.DbType.AnsiString or
+                        System.Data.DbType.AnsiStringFixedLength =>
+                            $"'{EscapeSqlString(p.Value.ToString())}'",
 
-                    System.Data.DbType.Xml => $"N'{EscapeSqlString(p.Value.ToString())}'",
+                        System.Data.DbType.Xml => $"N'{EscapeSqlString(p.Value.ToString())}'",
 
-                    System.Data.DbType.Date => $"'{((DateTime)p.Value):yyyy-MM-dd}'",
+                        System.Data.DbType.Date => p.Value switch
+                        {
+                            DateOnly d => $"'{d:yyyy-MM-dd}'",
+                            DateTime d => $"'{d:yyyy-MM-dd}'",
+                            _ => $"'{p.Value}'"
+                        },
 
-                    System.Data.DbType.DateTime or
-                    System.Data.DbType.DateTime2 => $"'{((DateTime)p.Value):yyyy-MM-ddTHH:mm:ss.fff}'",
+                        System.Data.DbType.DateTime or
+                        System.Data.DbType.DateTime2 => p.Value switch
+                        {
+                            DateOnly d => $"'{d:yyyy-MM-dd}'",
+                            DateTime d => $"'{d:yyyy-MM-ddTHH:mm:ss.fff}'",
+                            _ => $"'{p.Value}'"
+                        },
 
-                    System.Data.DbType.DateTimeOffset =>
-                        $"'{((DateTimeOffset)p.Value):yyyy-MM-ddTHH:mm:ss.fffffffzzz}'",
+                        System.Data.DbType.DateTimeOffset => p.Value switch
+                        {
+                            DateTimeOffset d => $"'{d:yyyy-MM-ddTHH:mm:ss.fffffffzzz}'",
+                            DateTime d => $"'{d:yyyy-MM-ddTHH:mm:ss.fff}'",
+                            _ => $"'{p.Value}'"
+                        },
 
-                    System.Data.DbType.Time => $"'{p.Value}'",
+                        System.Data.DbType.Time => p.Value switch
+                        {
+                            TimeOnly t => $"'{t:HH:mm:ss.fffffff}'",
+                            TimeSpan t => $"'{t}'",
+                            _ => $"'{p.Value}'"
+                        },
 
-                    System.Data.DbType.Boolean => (bool)p.Value ? "1" : "0",
+                        System.Data.DbType.Boolean => p.Value switch
+                        {
+                            bool b => b ? "1" : "0",
+                            _ => Convert.ToBoolean(p.Value) ? "1" : "0"
+                        },
 
-                    System.Data.DbType.Guid => $"'{p.Value}'",
+                        System.Data.DbType.Byte => p.Value switch
+                        {
+                            byte b => b.ToString(),
+                            _ => Convert.ToByte(p.Value).ToString()
+                        },
 
-                    _ => p.Value.ToString()
-                };
+                        System.Data.DbType.Int16 => p.Value switch
+                        {
+                            short s => s.ToString(),
+                            _ => Convert.ToInt16(p.Value).ToString()
+                        },
+
+                        System.Data.DbType.Int32 => p.Value switch
+                        {
+                            int i => i.ToString(),
+                            _ => Convert.ToInt32(p.Value).ToString()
+                        },
+
+                        System.Data.DbType.Int64 => p.Value switch
+                        {
+                            long l => l.ToString(),
+                            _ => Convert.ToInt64(p.Value).ToString()
+                        },
+
+                        System.Data.DbType.Single => p.Value switch
+                        {
+                            float f => f.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                            _ => Convert.ToSingle(p.Value).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        },
+
+                        System.Data.DbType.Double => p.Value switch
+                        {
+                            double d => d.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                            _ => Convert.ToDouble(p.Value).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        },
+
+                        System.Data.DbType.Decimal or
+                        System.Data.DbType.Currency => p.Value switch
+                        {
+                            decimal m => m.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                            _ => Convert.ToDecimal(p.Value).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        },
+
+                        System.Data.DbType.Guid => p.Value switch
+                        {
+                            Guid g => $"'{g}'",
+                            _ => $"'{p.Value}'"
+                        },
+
+                        System.Data.DbType.Binary => p.Value switch
+                        {
+                            byte[] bytes => $"0x{Convert.ToHexString(bytes)}",
+                            _ => $"'{p.Value}'"
+                        },
+
+                        _ => p.Value?.ToString() ?? "NULL"
+                    };
+                }
+                list.Add(new ProfiledParameter(name, sqlType, val));
             }
-            list.Add(new ProfiledParameter(name, sqlType, val));
+            return list;
         }
-        return list;
+        catch
+        {
+            return null;
+        }
     }
 
     private static string MapDbTypeToSql(System.Data.DbType dbType, int size)
