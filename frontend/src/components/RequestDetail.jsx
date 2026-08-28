@@ -25,6 +25,68 @@ function CopyButton({ text, isDark }) {
   );
 }
 
+function curlQuote(value) {
+  return `"${String(value ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r?\n/g, '\\n')}"`;
+}
+
+function buildCurlCommand(detail) {
+  const parts = ['curl', '--location'];
+  const method = (detail.method || 'GET').toUpperCase();
+  parts.push('--request', curlQuote(method));
+  if (detail.url) {
+    parts.push(curlQuote(detail.url));
+  }
+
+  const headers = detail.headers && typeof detail.headers === 'object' ? Object.entries(detail.headers) : [];
+  headers.forEach(([key, value]) => {
+    if (!key || value == null || value === '') return;
+    parts.push('--header', curlQuote(`${key}: ${value}`));
+  });
+
+  if (detail.body && method !== 'GET' && method !== 'HEAD') {
+    parts.push('--data-raw', curlQuote(detail.body));
+  }
+
+  return parts.join(' ');
+}
+
+function CopyCurlButton({ detail, isDark }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = (e) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(buildCurlCommand(detail)).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  return (
+    <button
+      onClick={handleCopy}
+      title="Copy cURL"
+      style={{
+        background: isDark ? '#3b3b3b' : '#e5e7eb',
+        border: 'none',
+        borderRadius: 4,
+        cursor: 'pointer',
+        padding: '3px 7px',
+        fontSize: 12,
+        lineHeight: 1,
+        color: isDark ? '#ccc' : '#374151',
+        opacity: copied ? 1 : 0.7,
+        transition: 'opacity 0.15s',
+      }}
+      onMouseEnter={e => e.currentTarget.style.opacity = '1'}
+      onMouseLeave={e => { if (!copied) e.currentTarget.style.opacity = '0.7'; }}
+    >
+      {copied ? '✓' : 'cURL'}
+    </button>
+  );
+}
+
 function linkifyIdeLinks(text, scheme) {
   if (!text || !scheme) return text;
   const rx = new RegExp(`(${scheme}://[^\\s<>"']+)`, 'g');
@@ -59,7 +121,27 @@ function buildExecutableSql(rawSql, params) {
   return lines.join('\n') + '\n\n' + sql;
 }
 
-export default function RequestDetail({ detail, onClose, isDark, scheme, expanded, onToggleExpand, explainPath }) {
+const CONNECTION_COLORS = {
+  '🔴': '#ef4444', '🟠': '#f97316', '🟡': '#eab308', '🟢': '#22c55e', '🔵': '#3b82f6',
+  '🟣': '#a855f7', '🟤': '#a16207', '⚪': '#9ca3af', '⚫': '#111827',
+  '🟥': '#dc2626', '🟧': '#f97316', '🟨': '#eab308', '🟩': '#16a34a', '🟦': '#2563eb',
+  '🟪': '#9333ea', '🟫': '#92400e', '⬜': '#e5e7eb', '⬛': '#374151',
+  '❤️': '#ef4444', '🧡': '#f97316', '💛': '#eab308', '💚': '#22c55e', '💙': '#3b82f6',
+  '💜': '#a855f7', '🤎': '#a16207', '🤍': '#d1d5db', '🖤': '#111827',
+};
+
+function parseConnectionEvent(line) {
+  const firstSpace = line.indexOf(' ');
+  if (firstSpace <= 0) {
+    return { token: '', text: line, color: '#9ca3af' };
+  }
+
+  const token = line.substring(0, firstSpace);
+  const text = line.substring(firstSpace + 1);
+  return { token, text, color: CONNECTION_COLORS[token] || '#9ca3af' };
+}
+
+export default function RequestDetail({ detail, onClose, isDark, scheme, expanded, onToggleExpand, explainPath, indexMetadataPath }) {
   const [planState, setPlanState] = useState({ open: false, loading: false, planXml: null, error: null });
 
   const handleExplain = (sql, parameters) => {
@@ -103,6 +185,11 @@ export default function RequestDetail({ detail, onClose, isDark, scheme, expande
       background: isDark ? '#252526' : '#f9fafb', borderRadius: 6,
       border: `1px solid ${isDark ? '#333' : '#e5e7eb'}`,
     },
+    queryCardError: {
+      margin: '8px 12px', padding: '10px 14px',
+      background: isDark ? '#341f1f' : '#fef2f2', borderRadius: 6,
+      border: '1px solid #ef4444',
+    },
     callerLine: { fontSize: 12, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6, color: isDark ? '#9cdcfe' : '#2563eb' },
     connBadge: {
       display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 11, padding: '1px 6px',
@@ -133,8 +220,6 @@ export default function RequestDetail({ detail, onClose, isDark, scheme, expande
   };
 
   const queries = detail.queries || [];
-  const connEvents = detail.connectionEvents || [];
-
   return (
     <div style={s.panel}>
       <div style={s.header}>
@@ -144,8 +229,24 @@ export default function RequestDetail({ detail, onClose, isDark, scheme, expande
             {detail.durationMs.toFixed(1)} ms &middot; Status {detail.statusCode} &middot; {queries.length} {queries.length === 1 ? 'query' : 'queries'}
             &middot; {new Date(detail.started).toLocaleString()}
           </div>
+          {detail.errorMessage && (
+            <div style={{ marginTop: 4, fontSize: 12, color: '#ef4444', wordBreak: 'break-word' }}>
+              {detail.errorMessage}
+            </div>
+          )}
+          {detail.responseBody && (
+            <pre style={{
+              marginTop: 6, marginBottom: 0, padding: '8px 10px', borderRadius: 4,
+              background: isDark ? '#341f1f' : '#fff1f2', border: '1px solid #ef4444',
+              color: isDark ? '#fecaca' : '#b91c1c', fontSize: 12, whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word', maxHeight: 180, overflow: 'auto',
+            }}>
+              {detail.responseBody}
+            </pre>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+          <CopyCurlButton detail={detail} isDark={isDark} />
           <button style={s.headerBtn} onClick={onToggleExpand} title={expanded ? 'Collapse' : 'Expand full screen'}>
             <svg width="16" height="16" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style={{ transform: expanded ? 'rotate(180deg)' : 'none' }}>
               <g fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2">
@@ -165,27 +266,46 @@ export default function RequestDetail({ detail, onClose, isDark, scheme, expande
       ) : (
         queries.map((q, i) => {
           const execSql = buildExecutableSql(q.sql, q.parameters);
+          const isError = !!q.errorMessage;
           return (
-            <div key={i} style={s.queryCard}>
+            <div key={i} style={isError ? s.queryCardError : s.queryCard}>
               <div style={s.callerLine}>
                 {q.connColor && (
-                  <span style={s.connBadge}>{q.connColor} {q.connEvent || 'OPEN'} #{q.connId}</span>
+                  <span style={{
+                    color: CONNECTION_COLORS[q.connColor] || '#9ca3af',
+                    fontWeight: 600,
+                    fontFamily: '"Cascadia Code", "Fira Code", "Consolas", monospace',
+                  }}>
+                    {q.connColor} {q.connEvent || 'OPEN'} #{q.connId}
+                  </span>
                 )}
                 {q.callerFile && (
                   <span>🔗 {q.callerFile} (Line {q.callerLine}) → {q.callerMethod}</span>
                 )}
-                {q.durationMs > 0 && (
-                  <span style={{ color: isDark ? '#888' : '#9ca3af', marginLeft: 'auto' }}>{q.durationMs.toFixed(1)} ms</span>
-                )}
+                <span style={{ color: isDark ? '#888' : '#9ca3af', marginLeft: 'auto' }}>
+                  {isError ? `Failed in ${q.durationMs.toFixed(1)} ms` : `Executed in ${q.durationMs.toFixed(1)} ms`}
+                </span>
               </div>
               {q.ideLink && (
                 <div style={{ fontSize: 11, marginBottom: 6 }}>{linkifyIdeLinks(q.ideLink, scheme)}</div>
               )}
+              {isError && q.errorMessage && (
+                <div style={{
+                  marginBottom: 6, padding: '6px 8px', borderRadius: 4,
+                  background: isDark ? '#4b1f1f' : '#fee2e2',
+                  color: isDark ? '#fecaca' : '#b91c1c',
+                  fontSize: 12, whiteSpace: 'pre-wrap',
+                }}>
+                  {q.errorMessage}
+                </div>
+              )}
               <div style={s.sqlToolbar}>
-                <button style={s.explainBtn} title="Get execution plan"
-                  onClick={() => handleExplain(q.sql, q.parameters)}
-                  onMouseEnter={e => e.currentTarget.style.opacity = '1'}
-                  onMouseLeave={e => e.currentTarget.style.opacity = '0.7'}>🗄</button>
+                {!isError && (
+                  <button style={s.explainBtn} title="Get execution plan"
+                    onClick={() => handleExplain(q.sql, q.parameters)}
+                    onMouseEnter={e => e.currentTarget.style.opacity = '1'}
+                    onMouseLeave={e => e.currentTarget.style.opacity = '0.7'}>🗄</button>
+                )}
                 <CopyButton text={execSql} isDark={isDark} />
               </div>
               <pre style={s.sql}>{execSql}</pre>
@@ -199,6 +319,7 @@ export default function RequestDetail({ detail, onClose, isDark, scheme, expande
           planXml={planState.planXml} error={planState.error} loading={planState.loading}
           onClose={() => setPlanState({ open: false, loading: false, planXml: null, error: null })}
           isDark={isDark}
+          indexMetadataPath={indexMetadataPath}
         />
       )}
     </div>

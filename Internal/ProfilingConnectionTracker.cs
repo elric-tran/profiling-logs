@@ -21,6 +21,9 @@ internal sealed class ProfilingConnectionTracker : IObserver<KeyValuePair<string
     private static int _colorSeq = -1;
 
     private static readonly ConcurrentDictionary<string, ConcurrentStack<string>> OpenColors = new();
+    private static readonly ConcurrentDictionary<System.Data.Common.DbCommand, ProfiledQuery> PendingQueries =
+        new(System.Collections.Generic.ReferenceEqualityComparer.Instance);
+    private static long _querySeq = 0;
 
     private readonly ProfilingLogsOptions _options;
     private readonly ProfilingStore? _store;
@@ -71,6 +74,18 @@ internal sealed class ProfilingConnectionTracker : IObserver<KeyValuePair<string
                     ProfilingStore.CurrentRequest.Value?.ConnectionEvents.Add(
                         $"{color} [CONN CLOSE] <- Id: #{connId}");
                 }
+            }
+
+            if (value.Key == RelationalEventId.CommandExecuted.Name && value.Value is CommandExecutedEventData executedData)
+            {
+                CompleteQuery(executedData.Command, executedData.Duration.TotalMilliseconds);
+                return;
+            }
+
+            if (value.Key == RelationalEventId.CommandError.Name && value.Value is CommandErrorEventData errorData)
+            {
+                CompleteQuery(errorData.Command, errorData.Duration.TotalMilliseconds, errorData.Exception);
+                return;
             }
 
             if (_options.EnableCallerComment
@@ -142,23 +157,46 @@ internal sealed class ProfilingConnectionTracker : IObserver<KeyValuePair<string
 
             var parameters = ExtractParameters(command);
 
-            currentRequest.Queries.Add(new ProfiledQuery(
-                Sql: command.CommandText,
-                DurationMs: 0,
-                CallerFile: caller.FileName,
-                CallerLine: caller.LineNumber,
-                CallerMethod: caller.MethodName,
-                IdeLink: ideLink,
-                ConnColor: connColor,
-                ConnId: connHashId,
-                ConnEvent: connColor != null ? "OPEN" : null,
-                Parameters: parameters));
+            var query = new ProfiledQuery
+            {
+                Sequence = Interlocked.Increment(ref _querySeq),
+                Sql = command.CommandText,
+                DurationMs = 0,
+                CallerFile = caller.FileName,
+                CallerLine = caller.LineNumber,
+                CallerMethod = caller.MethodName,
+                IdeLink = ideLink,
+                ConnColor = connColor,
+                ConnId = connHashId,
+                ConnEvent = connColor != null ? "OPEN" : null,
+                Parameters = parameters
+            };
+
+            currentRequest.Queries.Add(query);
+            PendingQueries[command] = query;
         }
 
         command.CommandText =
             command.CommandText + "\r\n\n" +
             $"{CallerMarker} {caller.FileName} (Line {caller.LineNumber}) -> {caller.MethodName}\r\n" +
             $"-- {ideLink}\r\n";
+    }
+
+    private static void CompleteQuery(System.Data.Common.DbCommand? command, double durationMs, Exception? exception = null)
+    {
+        if (command == null)
+        {
+            return;
+        }
+
+        if (PendingQueries.TryRemove(command, out var query))
+        {
+            query.DurationMs = durationMs;
+            if (exception != null)
+            {
+                query.ErrorMessage = exception.ToString();
+            }
+        }
     }
 
     private static List<ProfiledParameter>? ExtractParameters(System.Data.Common.DbCommand command)

@@ -59,10 +59,7 @@ public static class ProfilingLogsExtensions
 
         var store = app.ApplicationServices.GetRequiredService<ProfilingStore>();
 
-        if (options.EnableConnectionColors || options.EnableCallerComment)
-        {
-            DiagnosticListener.AllListeners.Subscribe(new ProfilingDiagnosticObserver(options, store));
-        }
+        DiagnosticListener.AllListeners.Subscribe(new ProfilingDiagnosticObserver(options, store));
 
         // Serve the profiler UI and JSON API
         app.UseMiddleware<ProfilerIdeLinkMiddleware>(options);
