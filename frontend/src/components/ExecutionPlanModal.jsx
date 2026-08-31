@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react'
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 
 // ── XML → Tree parser ──────────────────────────────────────────────────────
 
@@ -73,6 +73,215 @@ function buildNode(el, ns) {
   }
 
   return node;
+}
+
+function extractIndexAnalysis(xml) {
+  try {
+    const doc = new DOMParser().parseFromString(xml, 'text/xml');
+    if (doc.getElementsByTagName('parsererror').length > 0) return null;
+
+    const ns = doc.documentElement.namespaceURI || '';
+    const relOps = ns
+      ? Array.from(doc.getElementsByTagNameNS(ns, 'RelOp'))
+      : Array.from(doc.getElementsByTagName('RelOp'));
+
+    const tableMap = new Map();
+    let totalRows = 0;
+  let ordinal = 0;
+
+    for (const rel of relOps) {
+      const physicalOp = rel.getAttribute('PhysicalOp') || '';
+      if (!/Index|Scan|Seek|Lookup/i.test(physicalOp) && !/Table Scan/i.test(physicalOp)) {
+        continue;
+      }
+
+      const estRows = parseFloat(rel.getAttribute('EstimateRows')) || 0;
+      const objectEl = findPlanObject(rel, ns);
+      if (!objectEl) continue;
+
+      const tableName = formatTableName(objectEl);
+      const indexName = formatIndexName(objectEl, physicalOp);
+      const predicate = extractPredicateText(rel, ns);
+    const nodeId = rel.getAttribute('NodeId') || '';
+    ordinal += 1;
+
+      if (!tableMap.has(tableName)) {
+        tableMap.set(tableName, {
+          tableName,
+          totalRows: 0,
+          indexes: new Map(),
+        });
+      }
+
+      const table = tableMap.get(tableName);
+      table.totalRows += estRows;
+      totalRows += estRows;
+
+      const indexKey = indexName || physicalOp || 'Unknown';
+      if (!table.indexes.has(indexKey)) {
+        table.indexes.set(indexKey, {
+          indexName: indexKey,
+          rows: 0,
+          physicalOps: new Set(),
+          predicates: new Set(),
+          nodeIds: new Set(),
+          firstOrder: ordinal,
+        });
+      }
+
+      const indexEntry = table.indexes.get(indexKey);
+      indexEntry.rows += estRows;
+      if (physicalOp) indexEntry.physicalOps.add(physicalOp);
+      if (predicate) indexEntry.predicates.add(predicate);
+      if (nodeId) indexEntry.nodeIds.add(nodeId);
+      indexEntry.firstOrder = Math.min(indexEntry.firstOrder, ordinal);
+    }
+
+    const tables = Array.from(tableMap.values())
+      .map(table => ({
+        tableName: table.tableName,
+        totalRows: table.totalRows,
+        tablePct: totalRows > 0 ? (table.totalRows / totalRows) * 100 : 0,
+        indexes: Array.from(table.indexes.values())
+          .map(index => ({
+            indexName: index.indexName,
+            rows: index.rows,
+            indexPct: table.totalRows > 0 ? (index.rows / table.totalRows) * 100 : 0,
+            physicalOps: Array.from(index.physicalOps),
+            predicates: Array.from(index.predicates),
+            nodeIds: Array.from(index.nodeIds),
+            firstOrder: index.firstOrder,
+          }))
+          .sort((a, b) => a.firstOrder - b.firstOrder || b.rows - a.rows || a.indexName.localeCompare(b.indexName)),
+      }))
+      .sort((a, b) => b.totalRows - a.totalRows || a.tableName.localeCompare(b.tableName));
+
+    return { totalRows, tables };
+  } catch {
+    return null;
+  }
+}
+
+function findPlanObject(el, ns) {
+  const objects = ns
+    ? Array.from(el.getElementsByTagNameNS(ns, 'Object'))
+    : Array.from(el.getElementsByTagName('Object'));
+
+  return objects.find(o => o.getAttribute('Table') || o.getAttribute('Index') || o.getAttribute('IndexKind')) || objects[0] || null;
+}
+
+function formatTableName(objectEl) {
+  const schema = objectEl.getAttribute('Schema') || objectEl.getAttribute('SchemaName') || '';
+  const table = objectEl.getAttribute('Table') || objectEl.getAttribute('TableName') || objectEl.getAttribute('Alias') || 'Unknown';
+  return schema ? `${schema}.${table}` : table;
+}
+
+function formatIndexName(objectEl, physicalOp) {
+  const index = objectEl.getAttribute('Index') || objectEl.getAttribute('IndexName') || objectEl.getAttribute('IndexKind') || '';
+  if (index) return index;
+  if (/Table Scan/i.test(physicalOp)) return 'Heap';
+  if (/Lookup/i.test(physicalOp)) return 'Lookup';
+  return physicalOp || 'Unknown';
+}
+
+function extractPredicateText(rel, ns) {
+  const predicates = ns
+    ? Array.from(rel.getElementsByTagNameNS(ns, 'Predicate'))
+    : Array.from(rel.getElementsByTagName('Predicate'));
+
+  if (predicates.length === 0) return '';
+  const text = predicates[0].textContent || '';
+  return text.replace(/\s+/g, ' ').trim().slice(0, 180);
+}
+
+function getUsagePalette(pct, isDark) {
+  if (pct < 20) return { bg: isDark ? 'rgba(127, 29, 29, 0.8)' : 'rgba(239, 68, 68, 0.18)', border: '#ef4444' };
+  if (pct < 35) return { bg: isDark ? 'rgba(154, 52, 18, 0.8)' : 'rgba(249, 115, 22, 0.18)', border: '#f97316' };
+  if (pct < 80) return { bg: isDark ? 'rgba(113, 63, 18, 0.75)' : 'rgba(234, 179, 8, 0.2)', border: '#eab308' };
+  if (pct < 90) return { bg: isDark ? 'rgba(22, 101, 52, 0.7)' : 'rgba(34, 197, 94, 0.2)', border: '#22c55e' };
+  return { bg: isDark ? 'rgba(22, 101, 52, 0.9)' : 'rgba(34, 197, 94, 0.28)', border: '#16a34a' };
+}
+
+function formatColumnType(col) {
+  const type = (col.dataType || '').toLowerCase();
+  if (['nvarchar', 'nchar'].includes(type)) {
+    return `${col.dataType}(${col.maxLength === -1 ? 'max' : Math.max(0, col.maxLength / 2)})`;
+  }
+  if (['varchar', 'char', 'varbinary', 'binary'].includes(type)) {
+    return `${col.dataType}(${col.maxLength === -1 ? 'max' : Math.max(0, col.maxLength)})`;
+  }
+  if (['decimal', 'numeric'].includes(type)) {
+    return `${col.dataType}(${col.precision},${col.scale})`;
+  }
+  return col.dataType || 'unknown';
+}
+
+function approximateColumnLength(col) {
+  const type = (col.dataType || '').toLowerCase();
+  if (['nvarchar', 'nchar'].includes(type)) return col.maxLength === -1 ? 4000 : Math.max(0, col.maxLength / 2);
+  if (['varchar', 'char', 'varbinary', 'binary'].includes(type)) return col.maxLength === -1 ? 8000 : Math.max(0, col.maxLength);
+  if (['decimal', 'numeric'].includes(type)) return Math.ceil((col.precision || 18) / 2);
+  if (['bit'].includes(type)) return 1;
+  if (['int', 'real', 'float'].includes(type)) return 4;
+  if (['bigint', 'datetime', 'datetime2', 'date', 'datetimeoffset'].includes(type)) return 8;
+  return 16;
+}
+
+function formatDate(value) {
+  if (!value) return '—';
+  try {
+    return new Date(value).toLocaleString();
+  } catch {
+    return '—';
+  }
+}
+
+function bracketName(name) {
+  return `[${String(name ?? '').replace(/]/g, ']]')}]`;
+}
+
+function formatQualifiedTableName(metadata) {
+  const parts = [];
+  if (metadata.databaseName) parts.push(bracketName(metadata.databaseName));
+  if (metadata.schemaName) parts.push(bracketName(metadata.schemaName));
+  if (metadata.tableName) parts.push(bracketName(metadata.tableName));
+  return parts.join('.');
+}
+
+function buildIndexScript(metadata, index, includeDrop, includeCreate) {
+  if (!metadata || !index) return '';
+
+  const tableName = formatQualifiedTableName(metadata);
+  const indexName = bracketName(index.name);
+  const keyColumns = index.columns.filter(c => !c.isIncluded);
+  const includeColumns = index.columns.filter(c => c.isIncluded);
+
+  const lines = [];
+  if (includeDrop) {
+    lines.push(`IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = '${String(index.name).replace(/'/g, "''")}' AND object_id = OBJECT_ID('${tableName}'))`);
+    lines.push('BEGIN');
+    lines.push(`DROP INDEX ${indexName} ON ${tableName}`);
+    lines.push('END');
+    lines.push('GO');
+    lines.push('');
+  }
+
+  if (includeCreate) {
+    lines.push(`CREATE ${index.isUnique ? 'UNIQUE ' : ''}INDEX ${indexName} ON ${tableName}`);
+    lines.push('(');
+    lines.push(
+      keyColumns.length > 0
+        ? keyColumns.map(c => `    ${bracketName(c.name)} ${c.isDescending ? 'DESC' : 'ASC'}`).join(',\n')
+        : `    ${bracketName(index.columns[0]?.name || '')} ASC`
+    );
+    lines.push(')');
+    if (includeColumns.length > 0) {
+      lines.push(`INCLUDE (${includeColumns.map(c => bracketName(c.name)).join(', ')})`);
+    }
+    lines.push('GO');
+  }
+
+  return lines.join('\n');
 }
 
 // ── SVG Operator Icons (SSMS-style) ─────────────────────────────────────
@@ -619,6 +828,692 @@ function NodeDetails({ node, isDark }) {
   );
 }
 
+function IndexAnalystPane({ analysis, selectedTable, onSelectTable, indexMetadataPath, isDark }) {
+  const [selectedIndexName, setSelectedIndexName] = useState('');
+  const [tableMetadata, setTableMetadata] = useState(null);
+  const [metadataError, setMetadataError] = useState(null);
+  const [loadingMetadata, setLoadingMetadata] = useState(false);
+  const [scriptIndex, setScriptIndex] = useState(null);
+  const tables = analysis?.tables || [];
+  if (tables.length === 0) {
+    return (
+      <div style={{ padding: 24, textAlign: 'center', color: '#999', fontSize: 13 }}>
+        No index usage found in this plan.
+      </div>
+    );
+  }
+
+  const currentTable = tables.find(t => t.tableName === selectedTable) || tables[0];
+  const currentIndex = currentTable.indexes.find(i => i.indexName === selectedIndexName) || currentTable.indexes[0];
+  const totalPct = currentTable.tablePct.toFixed(1);
+  const usagePalette = getUsagePalette(currentIndex.indexPct, isDark);
+
+  useEffect(() => {
+    if (!indexMetadataPath) {
+      setTableMetadata(null);
+      setMetadataError('Metadata endpoint is not configured.');
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingMetadata(true);
+    setMetadataError(null);
+
+    fetch(indexMetadataPath, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tableName: currentTable.tableName }),
+    })
+      .then(r => r.json().then(data => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (cancelled) return;
+        if (!ok || data.error) {
+          setMetadataError(data.error || 'Failed to load table metadata.');
+          setTableMetadata(null);
+        } else {
+          setTableMetadata(data);
+        }
+      })
+      .catch(err => {
+        if (!cancelled) {
+          setMetadataError(err.message);
+          setTableMetadata(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingMetadata(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [indexMetadataPath, currentTable.tableName]);
+
+  useEffect(() => {
+    if (!currentTable.indexes.length) {
+      setSelectedIndexName('');
+      return;
+    }
+    setSelectedIndexName(prev => (
+      currentTable.indexes.some(i => i.indexName === prev)
+        ? prev
+        : currentTable.indexes[0].indexName
+    ));
+  }, [currentTable.tableName]);
+
+  const s = {
+    wrap: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+      color: isDark ? '#d4d4d4' : '#1f2937',
+    },
+    topBar: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 12,
+      flexWrap: 'wrap',
+      padding: '0 0 4px 0',
+    },
+    label: {
+      fontSize: 12,
+      color: isDark ? '#9ca3af' : '#6b7280',
+      fontWeight: 600,
+    },
+    select: {
+      minWidth: 280,
+      maxWidth: '100%',
+      padding: '6px 8px',
+      borderRadius: 4,
+      border: `1px solid ${isDark ? '#444' : '#d1d5db'}`,
+      background: isDark ? '#1e1e1e' : '#fff',
+      color: isDark ? '#d4d4d4' : '#111',
+      fontSize: 12,
+    },
+    stat: {
+      fontSize: 12,
+      color: isDark ? '#9ca3af' : '#6b7280',
+    },
+    summary: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 8,
+      flexWrap: 'wrap',
+      padding: '10px 12px',
+      borderRadius: 6,
+      background: usagePalette.bg,
+      border: `1px solid ${usagePalette.border}`,
+      fontSize: 12,
+    },
+    summaryMain: { display: 'flex', flexDirection: 'column', gap: 4 },
+    summaryLine: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
+    pill: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '2px 8px',
+      borderRadius: 999,
+      fontSize: 11,
+      background: isDark ? '#333' : '#e5e7eb',
+      color: isDark ? '#d4d4d4' : '#374151',
+    },
+    table: {
+      width: '100%',
+      borderCollapse: 'collapse',
+      fontSize: 12,
+    },
+    th: {
+      textAlign: 'left',
+      padding: '8px 10px',
+      borderBottom: `1px solid ${isDark ? '#444' : '#e5e7eb'}`,
+      color: isDark ? '#9ca3af' : '#6b7280',
+      fontWeight: 600,
+      background: isDark ? '#262626' : '#f9fafb',
+      position: 'sticky',
+      top: 0,
+      zIndex: 1,
+    },
+    td: {
+      padding: '8px 10px',
+      borderBottom: `1px solid ${isDark ? '#333' : '#f3f4f6'}`,
+      verticalAlign: 'top',
+    },
+    badge: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '1px 6px',
+      borderRadius: 999,
+      fontSize: 11,
+      background: isDark ? '#333' : '#e5e7eb',
+      color: isDark ? '#d4d4d4' : '#374151',
+    },
+    muted: {
+      color: isDark ? '#9ca3af' : '#6b7280',
+      fontSize: 11,
+    },
+  };
+
+  return (
+    <div style={s.wrap}>
+      <div style={s.topBar}>
+        <span style={s.label}>Table</span>
+        <select
+          style={s.select}
+          value={currentTable.tableName}
+          onChange={e => onSelectTable(e.target.value)}
+        >
+          {tables.map(t => (
+            <option key={t.tableName} value={t.tableName}>
+              {t.tableName} ({t.indexes.length} index{t.indexes.length === 1 ? '' : 'es'}) - {t.indexes[0]
+                ? `[${t.indexes[0].indexName}] ${t.indexes[0].physicalOps[0] || 'Unknown'} (Node ${t.indexes[0].nodeIds[0] || '-'}, ${t.indexes[0].indexPct.toFixed(0)}%)`
+                : 'No index'}
+            </option>
+          ))}
+        </select>
+        <span style={s.stat}>
+          Table share {totalPct}% of analyzed operators · Estimated rows {currentTable.totalRows.toFixed(1)}
+        </span>
+      </div>
+
+      {currentIndex && (
+        <div style={s.summary}>
+          <div style={s.summaryMain}>
+            <div style={s.summaryLine}>
+              <span style={s.pill}>{currentTable.tableName}</span>
+              <span style={s.pill}>{currentIndex.indexName}</span>
+              <span style={s.pill}>{currentIndex.physicalOps[0] || 'Unknown'}</span>
+              <span style={s.pill}>Node {currentIndex.nodeIds[0] || '-'}</span>
+              <span style={s.pill}>{currentIndex.indexPct.toFixed(0)}%</span>
+            </div>
+            <div style={{ color: isDark ? '#d4d4d4' : '#1f2937', fontWeight: 600 }}>
+              {`[${currentTable.tableName}] [${currentIndex.indexName}] ${currentIndex.physicalOps[0] || 'Unknown'} (Node ${currentIndex.nodeIds[0] || '-'}, ${currentIndex.indexPct.toFixed(0)}%)`}
+            </div>
+            <div style={{ color: isDark ? '#9ca3af' : '#6b7280' }}>
+              {`${currentIndex.indexName} is first index use in this table ${currentTable.tableName.split('.').pop() || currentTable.tableName}`}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ overflow: 'auto', border: `1px solid ${isDark ? '#333' : '#e5e7eb'}`, borderRadius: 6 }}>
+        <table style={s.table}>
+          <thead>
+            <tr>
+              <th style={s.th}>Index</th>
+              <th style={s.th}>Physical ops</th>
+              <th style={{ ...s.th, textAlign: 'right' }}>Estimated rows</th>
+              <th style={{ ...s.th, textAlign: 'right' }}>Index %</th>
+              <th style={{ ...s.th, textAlign: 'right' }}>Table %</th>
+              <th style={s.th}>Predicate</th>
+            </tr>
+          </thead>
+          <tbody>
+            {currentTable.indexes.map(index => (
+              <tr
+                key={index.indexName}
+                onClick={() => setSelectedIndexName(index.indexName)}
+                style={{
+                  cursor: 'pointer',
+                  background: currentIndex?.indexName === index.indexName ? usagePalette.bg : 'transparent',
+                }}
+                onMouseEnter={e => {
+                  if (currentIndex?.indexName !== index.indexName) e.currentTarget.style.background = isDark ? '#2a2d2e' : '#f9fafb';
+                }}
+                onMouseLeave={e => {
+                  if (currentIndex?.indexName !== index.indexName) e.currentTarget.style.background = 'transparent';
+                }}
+              >
+                <td style={s.td}>
+                  <div style={{ fontWeight: 600 }}>{index.indexName}</div>
+                  <div style={s.muted}>
+                    {`${index.physicalOps[0] || 'Unknown'} (Node ${index.nodeIds[0] || '-'}, ${index.indexPct.toFixed(0)}%)`}
+                  </div>
+                </td>
+                <td style={s.td}>
+                  {index.physicalOps.length > 0 ? index.physicalOps.join(', ') : 'Unknown'}
+                </td>
+                <td style={{ ...s.td, textAlign: 'right', fontFamily: 'monospace' }}>
+                  {index.rows.toFixed(1)}
+                </td>
+                <td style={{ ...s.td, textAlign: 'right', fontFamily: 'monospace' }}>
+                  {index.indexPct.toFixed(1)}%
+                </td>
+                <td style={{ ...s.td, textAlign: 'right', fontFamily: 'monospace' }}>
+                  {currentTable.tablePct.toFixed(1)}%
+                </td>
+                <td style={{ ...s.td, wordBreak: 'break-word' }}>
+                  {index.predicates.length > 0 ? index.predicates.join(' | ') : <span style={s.muted}>No predicate captured</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={s.stat}>
+        Total analyzed estimated rows in this query: {analysis.totalRows.toFixed(1)}
+      </div>
+    </div>
+  );
+}
+
+function IndexMetadataGrid({ analysis, currentTable, currentIndex, tableMetadata, onSelectTable, usagePalette, isDark, onScriptIndex }) {
+  const usageByIndexName = new Map(
+    (currentTable.indexes || []).map(index => [index.indexName, index])
+  );
+  const metadataIndexes = tableMetadata?.indexes?.length
+    ? tableMetadata.indexes
+    : (currentTable.indexes || []).map((index, idx) => ({
+      name: index.indexName,
+      typeDesc: index.physicalOps[0] || 'Unknown',
+      isPrimaryKey: idx === 0,
+      columns: [],
+      estimatedSizeMb: null,
+    }));
+  const metadataColumns = tableMetadata?.columns || [];
+  const selectedIndexName = currentIndex?.indexName || metadataIndexes[0]?.name || '';
+  const selectedMetadataIndex = metadataIndexes.find(i => i.name === selectedIndexName) || metadataIndexes[0];
+  const rowCount = selectedMetadataIndex?.statsRows ?? currentTable.totalRows ?? 0;
+
+  const s = {
+    wrap: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+      color: isDark ? '#d4d4d4' : '#1f2937',
+    },
+    topBar: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 12,
+      flexWrap: 'wrap',
+      padding: '0 0 4px 0',
+    },
+    label: {
+      fontSize: 12,
+      color: isDark ? '#9ca3af' : '#6b7280',
+      fontWeight: 600,
+    },
+    select: {
+      minWidth: 280,
+      maxWidth: '100%',
+      padding: '6px 8px',
+      borderRadius: 4,
+      border: `1px solid ${isDark ? '#444' : '#d1d5db'}`,
+      background: isDark ? '#1e1e1e' : '#fff',
+      color: isDark ? '#d4d4d4' : '#111',
+      fontSize: 12,
+    },
+    stat: {
+      fontSize: 12,
+      color: isDark ? '#9ca3af' : '#6b7280',
+    },
+    summary: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 8,
+      flexWrap: 'wrap',
+      padding: '10px 12px',
+      borderRadius: 6,
+      background: usagePalette.bg || (isDark ? '#2a2d2e' : '#eef2ff'),
+      border: `1px solid ${usagePalette.border || (isDark ? '#444' : '#c7d2fe')}`,
+      fontSize: 12,
+    },
+    summaryMain: { display: 'flex', flexDirection: 'column', gap: 4 },
+    summaryLine: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
+    pill: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '2px 8px',
+      borderRadius: 999,
+      fontSize: 11,
+      background: isDark ? '#333' : '#e5e7eb',
+      color: isDark ? '#d4d4d4' : '#374151',
+    },
+    tableWrap: {
+      overflow: 'auto',
+      border: `1px solid ${isDark ? '#333' : '#e5e7eb'}`,
+      borderRadius: 6,
+      maxHeight: '100%',
+    },
+    table: {
+      width: '100%',
+      borderCollapse: 'collapse',
+      fontSize: 12,
+      minWidth: 980,
+    },
+    th: {
+      textAlign: 'left',
+      padding: '8px 10px',
+      borderBottom: `1px solid ${isDark ? '#444' : '#e5e7eb'}`,
+      color: isDark ? '#9ca3af' : '#6b7280',
+      fontWeight: 600,
+      background: isDark ? '#262626' : '#f9fafb',
+      position: 'sticky',
+      top: 0,
+      zIndex: 1,
+      verticalAlign: 'bottom',
+      whiteSpace: 'nowrap',
+    },
+    td: {
+      padding: '8px 10px',
+      borderBottom: `1px solid ${isDark ? '#333' : '#f3f4f6'}`,
+      verticalAlign: 'top',
+      whiteSpace: 'nowrap',
+    },
+    muted: {
+      color: isDark ? '#9ca3af' : '#6b7280',
+      fontSize: 11,
+    },
+    indexCell: {
+      textAlign: 'center',
+      fontFamily: 'monospace',
+      whiteSpace: 'nowrap',
+    },
+  };
+
+  return (
+    <>
+      <IndexMetadataGrid
+        analysis={analysis}
+        currentTable={currentTable}
+        currentIndex={currentIndex}
+        tableMetadata={tableMetadata}
+        onSelectTable={onSelectTable}
+        usagePalette={usagePalette}
+        isDark={isDark}
+        onScriptIndex={setScriptIndex}
+      />
+      {scriptIndex && tableMetadata && (
+        <ScriptIndexModal
+          metadata={tableMetadata}
+          index={scriptIndex}
+          isDark={isDark}
+          onClose={() => setScriptIndex(null)}
+        />
+      )}
+    </>
+  );
+
+  return (
+    <div style={s.wrap}>
+      <div style={s.topBar}>
+        <span style={s.label}>Table</span>
+        <select
+          style={s.select}
+          value={currentTable.tableName}
+          onChange={e => onSelectTable(e.target.value)}
+        >
+          {analysis.tables.map(t => (
+            <option key={t.tableName} value={t.tableName}>
+              {t.tableName} ({t.indexes.length} index{t.indexes.length === 1 ? '' : 'es'}) - {t.indexes[0]
+                ? `[${t.indexes[0].indexName}] ${t.indexes[0].physicalOps[0] || 'Unknown'} (Node ${t.indexes[0].nodeIds[0] || '-'}, ${t.indexes[0].indexPct.toFixed(0)}%)`
+                : 'No index'}
+            </option>
+          ))}
+        </select>
+        <span style={s.stat}>
+          Table share {currentTable.tablePct.toFixed(1)}% of analyzed operators · Estimated rows {rowCount.toFixed(1)}
+        </span>
+      </div>
+
+      <div style={s.tableWrap}>
+        <table style={s.table}>
+          <thead>
+            <tr>
+              <th style={s.th}>Table column</th>
+              <th style={{ ...s.th, width: 90 }}>Density</th>
+              <th style={{ ...s.th, width: 160 }}>Column type</th>
+              <th style={{ ...s.th, width: 110 }}>Column length</th>
+              <th style={{ ...s.th, width: 140 }}>Predicate</th>
+              {metadataIndexes.map((index, idx) => {
+                const usage = usageByIndexName.get(index.name);
+                return (
+                  <th key={index.name} style={{ ...s.th, minWidth: 170, background: isDark ? '#202020' : '#f3f4f6' }}>
+                    <div style={{ fontWeight: 700, color: isDark ? '#e5e7eb' : '#111827', wordBreak: 'break-word' }}>
+                      {`Index ${idx + 1}`}
+                    </div>
+                    <div style={s.muted}>
+                      {`[${index.name}] ${usage ? (usage.physicalOps[0] || 'Unknown') : (index.isPrimaryKey ? 'Primary Key' : 'Unknown')}${usage ? ` (Node ${usage.nodeIds[0] || '-'}, ${usage.indexPct.toFixed(0)}%)` : ''}`}
+                    </div>
+                    <div style={s.muted}>{index.typeDesc}</div>
+                    <div style={s.muted}>
+                      {usage ? `${usage.indexPct.toFixed(0)}% · ${usage.physicalOps[0] || 'Unknown'}` : index.isPrimaryKey ? 'Primary key' : 'No usage data'}
+                    </div>
+                  </th>
+                );
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style={s.td}><strong>Total score</strong></td>
+              <td style={s.td}>—</td>
+              <td style={s.td}>—</td>
+              <td style={s.td}>—</td>
+              <td style={s.td}>—</td>
+              {metadataIndexes.map(index => {
+                const usage = usageByIndexName.get(index.name);
+                const pct = usage?.indexPct ?? 0;
+                const palette = getUsagePalette(pct, isDark);
+                return (
+                  <td key={index.name} style={{ ...s.td, ...s.indexCell, background: palette.bg, color: isDark ? '#fff' : '#111' }}>
+                    {pct.toFixed(0)}%
+                  </td>
+                );
+              })}
+            </tr>
+
+            <tr>
+              <td style={s.td}><strong>Estimated Size (MB)</strong></td>
+              <td style={s.td}>—</td>
+              <td style={s.td}>—</td>
+              <td style={s.td}>—</td>
+              <td style={s.td}>—</td>
+              {tableMetadata.indexes.map(index => (
+                <td key={index.name} style={{ ...s.td, ...s.indexCell }}>
+                  {index.estimatedSizeMb?.toFixed(2) ?? '—'}
+                </td>
+              ))}
+            </tr>
+
+            {metadataColumns.length === 0 ? (
+              <tr>
+                <td style={s.td} colSpan={5 + metadataIndexes.length}>
+                  <span style={s.muted}>Loading table metadata...</span>
+                </td>
+              </tr>
+            ) : metadataColumns.map(col => {
+              const currentSelection = selectedMetadataIndex?.columns?.find(c => c.name === col.name);
+              const approxLength = approximateColumnLength(col);
+              return (
+                <tr key={col.ordinal}>
+                  <td style={s.td}>
+                    <div style={{ fontWeight: 600 }}>{col.name}</div>
+                    <div style={s.muted}>{col.isIdentity ? 'Identity' : col.isNullable ? 'Nullable' : 'Not null'}</div>
+                  </td>
+                  <td style={s.td}>—</td>
+                  <td style={s.td}>{col.dataType}</td>
+                  <td style={s.td}>{approxLength}</td>
+                  <td style={s.td}>{currentSelection ? (currentSelection.isIncluded ? 'Included' : currentSelection.keyOrdinal ?? '✓') : '—'}</td>
+                  {metadataIndexes.map(index => {
+                    const indexCol = index.columns.find(c => c.name === col.name);
+                    return (
+                      <td key={index.name} style={{ ...s.td, ...s.indexCell }}>
+                        {indexCol ? (indexCol.isIncluded ? 'Included' : indexCol.keyOrdinal || '✓') : ''}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+
+            <tr>
+              <td style={s.td}><strong>Script options</strong></td>
+              <td style={s.td} />
+              <td style={s.td} />
+              <td style={s.td} />
+              <td style={s.td} />
+              {metadataIndexes.map(index => (
+                <td key={index.name} style={{ ...s.td, ...s.indexCell }}>
+                  <button
+                    type="button"
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      cursor: tableMetadata ? 'pointer' : 'default',
+                      fontSize: 16,
+                      color: isDark ? '#9ca3af' : '#6b7280',
+                      opacity: tableMetadata ? 1 : 0.35,
+                    }}
+                    title={tableMetadata ? `Script ${index.name}` : 'Table metadata is loading'}
+                    onClick={() => tableMetadata && onScriptIndex(index)}
+                    disabled={!tableMetadata}
+                  >
+                    📝
+                  </button>
+                </td>
+              ))}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ScriptIndexModal({ metadata, index, isDark, onClose }) {
+  const [includeDrop, setIncludeDrop] = useState(true);
+  const [includeCreate, setIncludeCreate] = useState(true);
+  const [copied, setCopied] = useState(false);
+
+  const script = useMemo(
+    () => buildIndexScript(metadata, index, includeDrop, includeCreate),
+    [includeCreate, includeDrop, index, metadata]
+  );
+
+  const s = {
+    overlay: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 100003,
+      background: 'rgba(0,0,0,0.35)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    window: {
+      width: 760,
+      maxWidth: '96vw',
+      height: 520,
+      maxHeight: '90vh',
+      background: isDark ? '#ffffff' : '#fff',
+      color: '#111',
+      border: '1px solid #9ca3af',
+      borderRadius: 2,
+      display: 'flex',
+      flexDirection: 'column',
+      boxShadow: '0 18px 48px rgba(0,0,0,.25)',
+      overflow: 'hidden',
+      fontFamily: 'Segoe UI, Tahoma, sans-serif',
+    },
+    header: {
+      padding: '8px 12px',
+      borderBottom: '1px solid #d1d5db',
+      fontWeight: 600,
+      background: '#f3f4f6',
+    },
+    body: {
+      flex: 1,
+      minHeight: 0,
+      padding: 8,
+      display: 'flex',
+    },
+    editor: {
+      width: '100%',
+      height: '100%',
+      resize: 'none',
+      border: '1px solid #9ca3af',
+      outline: 'none',
+      fontFamily: '"Consolas", "Cascadia Code", monospace',
+      fontSize: 13,
+      lineHeight: 1.4,
+      padding: 8,
+      color: '#111',
+      background: '#fff',
+      overflow: 'auto',
+      whiteSpace: 'pre',
+    },
+    footer: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '8px 12px',
+      borderTop: '1px solid #d1d5db',
+      background: '#f3f4f6',
+      flexWrap: 'wrap',
+    },
+    check: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#111' },
+    btn: {
+      border: '1px solid #9ca3af',
+      background: '#fff',
+      padding: '4px 14px',
+      borderRadius: 2,
+      cursor: 'pointer',
+      fontSize: 12,
+    },
+    primaryBtn: {
+      border: '1px solid #2563eb',
+      background: '#fff',
+      padding: '4px 14px',
+      borderRadius: 2,
+      cursor: 'pointer',
+      fontSize: 12,
+    },
+    disabledBtn: {
+      border: '1px solid #cbd5e1',
+      background: '#f8fafc',
+      color: '#94a3b8',
+      padding: '4px 14px',
+      borderRadius: 2,
+      cursor: 'not-allowed',
+      fontSize: 12,
+    },
+  };
+
+  const copyScript = async () => {
+    await navigator.clipboard.writeText(script);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+
+  if (!metadata || !index) return null;
+
+  return (
+    <div style={s.overlay} onClick={onClose}>
+      <div style={s.window} onClick={e => e.stopPropagation()}>
+        <div style={s.header}>Script Index</div>
+        <div style={s.body}>
+          <textarea readOnly value={script} style={s.editor} />
+        </div>
+        <div style={s.footer}>
+          <label style={s.check}>
+            <input type="checkbox" checked={includeDrop} onChange={e => setIncludeDrop(e.target.checked)} />
+            DROP
+          </label>
+          <label style={s.check}>
+            <input type="checkbox" checked={includeCreate} onChange={e => setIncludeCreate(e.target.checked)} />
+            CREATE
+          </label>
+          <div style={{ flex: 1 }} />
+          <button type="button" style={s.btn} onClick={copyScript}>{copied ? 'Copied' : 'Copy to Clipboard'}</button>
+          <button type="button" style={s.disabledBtn} disabled title="Execution is not enabled">Execute</button>
+          <button type="button" style={s.btn} onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Formatted XML fallback ──────────────────────────────────────────────
 
 function formatXml(xml) {
@@ -641,11 +1536,13 @@ function formatXml(xml) {
 export default function ExecutionPlanModal({ planXml, error, loading, onClose, isDark }) {
   const [zoom, setZoom] = useState(1);
   const [selectedNode, setSelectedNode] = useState(null);
-  const [viewMode, setViewMode] = useState('visual');
+  const [activeTab, setActiveTab] = useState('visual');
+  const [selectedTable, setSelectedTable] = useState('');
   const [collapsedSet, setCollapsedSet] = useState(new Set());
   const containerRef = useRef(null);
   const dragging = useRef(false);
   const dragStart = useRef({ x: 0, y: 0, scrollLeft: 0, scrollTop: 0 });
+  const indexAnalysis = useMemo(() => (planXml ? extractIndexAnalysis(planXml) : null), [planXml]);
 
   const zoomIn = () => setZoom(z => Math.min(z + 0.2, 4));
   const zoomOut = () => setZoom(z => Math.max(z - 0.2, 0.3));
@@ -659,11 +1556,12 @@ export default function ExecutionPlanModal({ planXml, error, loading, onClose, i
   }, []);
 
   useEffect(() => {
+    if (activeTab !== 'visual') return undefined;
     const el = containerRef.current;
     if (!el) return;
     el.addEventListener('wheel', handleWheel, { passive: false });
     return () => el.removeEventListener('wheel', handleWheel);
-  }, [handleWheel]);
+  }, [handleWheel, activeTab]);
 
   const onMouseDown = (e) => {
     if (e.button !== 0) return;
@@ -699,6 +1597,19 @@ export default function ExecutionPlanModal({ planXml, error, loading, onClose, i
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose]);
+
+  useEffect(() => {
+    if (!indexAnalysis || indexAnalysis.tables.length === 0) {
+      setSelectedTable('');
+      return;
+    }
+
+    setSelectedTable(prev => (
+      indexAnalysis.tables.some(t => t.tableName === prev)
+        ? prev
+        : indexAnalysis.tables[0].tableName
+    ));
+  }, [indexAnalysis]);
 
   const onToggleCollapse = useCallback((nodeId) => {
     setCollapsedSet(prev => {
@@ -763,7 +1674,7 @@ export default function ExecutionPlanModal({ planXml, error, loading, onClose, i
       background: 'none', border: 'none', cursor: 'pointer',
       fontSize: 18, color: isDark ? '#999' : '#6b7280', padding: '0 4px',
     },
-    container: { flex: 1, overflow: 'auto', cursor: 'grab', minHeight: 0 },
+    container: { flex: 1, overflow: 'auto', cursor: activeTab === 'visual' ? 'grab' : 'default', minHeight: 0 },
     content: { transformOrigin: '0 0', transform: `scale(${zoom})`, padding: 24, minWidth: 'max-content' },
   };
 
@@ -772,7 +1683,7 @@ export default function ExecutionPlanModal({ planXml, error, loading, onClose, i
     body = <div style={{ padding: 40, textAlign: 'center', color: '#999' }}>Loading execution plan...</div>;
   } else if (error) {
     body = <div style={{ padding: 40, textAlign: 'center', color: '#ef4444' }}>Error: {error}</div>;
-  } else if (viewMode === 'visual' && planTrees) {
+  } else if (activeTab === 'visual' && planTrees) {
     body = (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
         {planTrees.map((root, i) => (
@@ -794,6 +1705,15 @@ export default function ExecutionPlanModal({ planXml, error, loading, onClose, i
         ))}
       </div>
     );
+  } else if (activeTab === 'index') {
+    body = (
+      <IndexAnalystPane
+        analysis={indexAnalysis}
+        selectedTable={selectedTable}
+        onSelectTable={setSelectedTable}
+        isDark={isDark}
+      />
+    );
   } else {
     body = (
       <pre style={{
@@ -812,21 +1732,25 @@ export default function ExecutionPlanModal({ planXml, error, loading, onClose, i
         <div style={s.header}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span>Execution Plan</span>
-            {planTrees && (
+            {planXml && (
               <div style={{ display: 'flex', gap: 2 }}>
                 <button
-                  style={viewMode === 'visual' ? s.btnActive : s.btn}
-                  onClick={() => setViewMode('visual')}
+                  style={activeTab === 'visual' ? s.btnActive : s.btn}
+                  onClick={() => setActiveTab('visual')}
                 >Visual</button>
                 <button
-                  style={viewMode === 'xml' ? s.btnActive : s.btn}
-                  onClick={() => setViewMode('xml')}
+                  style={activeTab === 'xml' ? s.btnActive : s.btn}
+                  onClick={() => setActiveTab('xml')}
                 >XML</button>
+                <button
+                  style={activeTab === 'index' ? s.btnActive : s.btn}
+                  onClick={() => setActiveTab('index')}
+                >Index analyst</button>
               </div>
             )}
           </div>
           <div style={s.controls}>
-            {viewMode === 'visual' && planTrees && (
+            {activeTab === 'visual' && planTrees && (
               <>
                 <button style={s.btn} onClick={collapseAll} title="Collapse all nodes">Collapse</button>
                 <button style={s.btn} onClick={expandAll} title="Expand all nodes">Expand</button>
@@ -842,11 +1766,11 @@ export default function ExecutionPlanModal({ planXml, error, loading, onClose, i
           </div>
         </div>
 
-        <div ref={containerRef} style={s.container} onMouseDown={onMouseDown}>
+        <div ref={containerRef} style={s.container} onMouseDown={activeTab === 'visual' ? onMouseDown : undefined}>
           <div style={s.content}>{body}</div>
         </div>
 
-        {viewMode === 'visual' && <NodeDetails node={selectedNode} isDark={isDark} />}
+        {activeTab === 'visual' && <NodeDetails node={selectedNode} isDark={isDark} />}
       </div>
     </div>
   );
